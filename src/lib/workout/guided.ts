@@ -37,5 +37,14 @@ export function firstPendingStep(logs: SetDraft[]) {
 }
 
 export function guidedWorkoutVolume(logs: SetDraft[]) {
-  return logs.reduce((total, log) => total + (log.status === "completed" ? (log.loadKg ?? 0) * (log.reps ?? 0) : 0), 0)
+  return logs.reduce((total, log) => total + (log.status === "completed" && (log.loadKg ?? 0) > 0 && (log.reps ?? 0) > 0 ? log.loadKg! * log.reps! : 0), 0)
+}
+
+export function normalizeWorkoutLogs(logs: SetDraft[], skipPending = false) {
+  const changedAt = new Date().toISOString()
+  return logs.map((log): SetDraft => {
+    const nullSet = log.status === "completed" && (log.loadKg === 0 || log.reps === 0)
+    if (!nullSet && !(skipPending && log.status === "pending")) return log
+    return { ...log, status: "skipped", completed: false, clientChangedAt: changedAt }
+  })
 }

@@ -76,6 +76,10 @@ export interface ActiveWorkoutSession {
   logs: SetDraft[]
 }
 
+export interface CompletedWorkoutSessionDetail extends ActiveWorkoutSession {
+  completedAt: string
+}
+
 export interface ProgressPoint {
   label: string
   weight: number

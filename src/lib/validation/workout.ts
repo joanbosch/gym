@@ -47,8 +47,22 @@ export const guidedWorkoutFinishSchema = z.object({
   completedAt: z.iso.datetime(),
 })
 
+export const completedWorkoutEditSchema = z.object({
+  sessionId: z.uuid(),
+  logs: setLogsSchema.min(1),
+}).superRefine((value, context) => {
+  value.logs.forEach((log, index) => {
+    if (log.sessionId !== value.sessionId) context.addIssue({ code: "custom", path: ["logs", index, "sessionId"], message: "La serie pertenece a otra sesión" })
+    if (log.status === "pending") context.addIssue({ code: "custom", path: ["logs", index, "status"], message: "Una sesión finalizada no puede contener series pendientes" })
+    if (log.completed !== (log.status === "completed")) context.addIssue({ code: "custom", path: ["logs", index, "completed"], message: "Estado de serie incoherente" })
+    if (log.status === "completed" && (log.loadKg === null || log.reps === null)) {
+      context.addIssue({ code: "custom", path: ["logs", index], message: "Las series completadas necesitan kilos y repeticiones" })
+    }
+  })
+})
+
 export function calculateVolume(logs: Array<{ loadKg: number | null; reps: number | null; completed: boolean }>) {
-  return logs.reduce((total, log) => total + (log.completed ? (log.loadKg ?? 0) * (log.reps ?? 0) : 0), 0)
+  return logs.reduce((total, log) => total + (log.completed && (log.loadKg ?? 0) > 0 && (log.reps ?? 0) > 0 ? log.loadKg! * log.reps! : 0), 0)
 }
 
 export function averageWeight(values: number[], window = 7) {

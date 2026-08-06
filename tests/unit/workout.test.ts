@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest"
 import { deduplicateDrafts } from "@/lib/offline/workout-drafts"
-import { averageWeight, calculateVolume, setLogSchema } from "@/lib/validation/workout"
+import { averageWeight, calculateVolume, completedWorkoutEditSchema, setLogSchema } from "@/lib/validation/workout"
 import { getYouTubeEmbedUrl, getYouTubeVideoId } from "@/lib/video"
-import { createGuidedLogs, firstPendingStep, guidedWorkoutVolume, orderedGuidedLogs } from "@/lib/workout/guided"
+import { createGuidedLogs, firstPendingStep, guidedWorkoutVolume, normalizeWorkoutLogs, orderedGuidedLogs } from "@/lib/workout/guided"
 import { upperA } from "@/lib/demo-data"
 
 describe("tracking de entrenamiento", () => {
@@ -16,6 +16,26 @@ describe("tracking de entrenamiento", () => {
 
   it("rechaza RIR fuera de 0 a 4", () => {
     expect(setLogSchema.safeParse({ id: crypto.randomUUID(), sessionId: "s", exerciseId: "e", setNumber: 1, loadKg: 20, reps: 10, rir: 5, completed: true, clientChangedAt: new Date().toISOString() }).success).toBe(false)
+  })
+
+  it("valida las correcciones de entrenamientos completados", () => {
+    const sessionId = "20000000-0000-4000-8000-000000000001"
+    const validLog = {
+      id: "20000000-0000-4000-8000-000000000002",
+      workoutKey: "upper-a",
+      sessionId,
+      exerciseId: "20000000-0000-4000-8000-000000000003",
+      setNumber: 1,
+      loadKg: 30,
+      reps: 10,
+      rir: 2,
+      status: "completed" as const,
+      completed: true,
+      clientChangedAt: new Date().toISOString(),
+    }
+    expect(completedWorkoutEditSchema.safeParse({ sessionId, logs: [validLog] }).success).toBe(true)
+    expect(completedWorkoutEditSchema.safeParse({ sessionId, logs: [{ ...validLog, loadKg: null }] }).success).toBe(false)
+    expect(completedWorkoutEditSchema.safeParse({ sessionId, logs: [{ ...validLog, status: "skipped", completed: false }] }).success).toBe(true)
   })
 })
 
@@ -64,6 +84,21 @@ describe("entrenamiento guiado", () => {
     logs[0] = { ...logs[0], loadKg: 20, reps: 10, status: "completed", completed: true }
     logs[1] = { ...logs[1], loadKg: 30, reps: 10, status: "skipped", completed: false }
     expect(guidedWorkoutVolume(logs)).toBe(200)
+  })
+
+  it("convierte las series con carga o repeticiones cero en omitidas", () => {
+    const logs = createGuidedLogs(upperA, "20000000-0000-4000-8000-000000000001")
+    logs[0] = { ...logs[0], loadKg: 0, reps: 10, status: "completed", completed: true }
+    logs[1] = { ...logs[1], loadKg: 20, reps: 0, status: "completed", completed: true }
+    const normalized = normalizeWorkoutLogs(logs)
+    expect(normalized[0]?.status).toBe("skipped")
+    expect(normalized[1]?.status).toBe("skipped")
+    expect(guidedWorkoutVolume(normalized)).toBe(0)
+  })
+
+  it("permite finalizar convirtiendo las series pendientes en omitidas", () => {
+    const logs = createGuidedLogs(upperA, "20000000-0000-4000-8000-000000000001")
+    expect(normalizeWorkoutLogs(logs, true).every((log) => log.status === "skipped")).toBe(true)
   })
 })
 

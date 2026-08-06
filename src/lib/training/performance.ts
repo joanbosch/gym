@@ -139,7 +139,7 @@ export async function loadExercisePerformance(exerciseIds?: string[]) {
      from public.set_logs sl
      join public.exercises e on e.id=sl.exercise_id
      join public.workout_sessions ws on ws.id=sl.workout_session_id
-     where sl.athlete_id=$1::uuid and ws.status='completed' and sl.completed and sl.load_kg is not null and sl.reps is not null
+     where sl.athlete_id=$1::uuid and ws.status='completed' and sl.completed and sl.load_kg>0 and sl.reps>0
        and coalesce(ws.snapshot->>'kind','strength')='strength'
        and not exists (
          select 1 from public.scheduled_sessions ss
@@ -224,8 +224,8 @@ export async function loadPerformanceDashboard() {
     volume: string
   }>(
     `select ws.id::text,coalesce(nullif(ws.snapshot->>'name',''),'Sesión') name,ws.started_at,coalesce(ws.completed_at,ws.updated_at) completed_at,
-            count(sl.id) filter (where sl.completed)::text completed_sets,
-            coalesce(sum(sl.load_kg * sl.reps) filter (where sl.completed),0)::text volume
+            count(sl.id) filter (where sl.completed and sl.load_kg>0 and sl.reps>0)::text completed_sets,
+            coalesce(sum(sl.load_kg * sl.reps) filter (where sl.completed and sl.load_kg>0 and sl.reps>0),0)::text volume
      from public.workout_sessions ws
      left join public.set_logs sl on sl.workout_session_id=ws.id
      where ws.athlete_id=$1::uuid and ws.status='completed'
@@ -233,10 +233,6 @@ export async function loadPerformanceDashboard() {
        and not exists (
          select 1 from public.scheduled_sessions ss
          where ss.id=ws.scheduled_session_id and ss.kind<>'strength'
-       )
-       and exists (
-         select 1 from public.set_logs strength_log
-         where strength_log.workout_session_id=ws.id and strength_log.completed
        )
      group by ws.id
      order by coalesce(ws.completed_at,ws.updated_at) desc`,
@@ -246,7 +242,7 @@ export async function loadPerformanceDashboard() {
             coalesce(sum(sl.load_kg*sl.reps),0)::text volume,count(*)::text completed_sets,
             count(distinct ws.id)::text sessions,round(avg(sl.rir)::numeric,1)::text avg_rir
      from public.set_logs sl join public.workout_sessions ws on ws.id=sl.workout_session_id
-     where sl.athlete_id=$1::uuid and ws.status='completed' and sl.completed
+     where sl.athlete_id=$1::uuid and ws.status='completed' and sl.completed and sl.load_kg>0 and sl.reps>0
        and coalesce(ws.snapshot->>'kind','strength')='strength'
        and not exists (
          select 1 from public.scheduled_sessions ss
@@ -260,7 +256,7 @@ export async function loadPerformanceDashboard() {
               coalesce(ws.completed_at,sl.created_at) performed_at,
               case when sl.load_kg is not null and sl.reps is not null then sl.load_kg*(1+least(sl.reps,30)/30.0) end e1rm
        from public.set_logs sl join public.workout_sessions ws on ws.id=sl.workout_session_id join public.exercises e on e.id=sl.exercise_id
-       where sl.athlete_id=$1::uuid and ws.status='completed' and sl.completed
+       where sl.athlete_id=$1::uuid and ws.status='completed' and sl.completed and sl.load_kg>0 and sl.reps>0
          and coalesce(ws.snapshot->>'kind','strength')='strength'
          and not exists (
            select 1 from public.scheduled_sessions ss
@@ -290,7 +286,8 @@ export async function loadPerformanceDashboard() {
     completedSets: Number(row.completed_sets),
     volume: Number(row.volume),
   }))
-  const dates = sessionsResult.rows.map((row) => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Madrid" }).format(row.completed_at))
+  const kpiSessions = sessionsResult.rows.filter((row) => Number(row.completed_sets) > 0)
+  const dates = kpiSessions.map((row) => new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Madrid" }).format(row.completed_at))
   const weekFormatter = new Intl.DateTimeFormat("es-ES", { day: "numeric", month: "short", timeZone: "Europe/Madrid" })
   const weeklyTrends: WeeklyTrainingPoint[] = weeklyResult.rows.map((row) => ({ week: weekFormatter.format(row.week_start), volume: Math.round(Number(row.volume)), sets: Number(row.completed_sets), sessions: Number(row.sessions), avgRir: row.avg_rir === null ? null : Number(row.avg_rir) }))
   const bodyTrend: BodyTrendPoint[] = bodyResult.rows.map((row) => {

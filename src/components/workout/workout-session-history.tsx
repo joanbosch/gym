@@ -1,7 +1,8 @@
 "use client"
 
 import { useState, useTransition } from "react"
-import { Clock3Icon, DumbbellIcon, Trash2Icon } from "lucide-react"
+import Link from "next/link"
+import { Clock3Icon, DumbbellIcon, PencilIcon, Trash2Icon } from "lucide-react"
 import { useRouter } from "next/navigation"
 import { toast } from "sonner"
 import { deleteWorkoutSession } from "@/actions/workout"
@@ -56,7 +57,7 @@ export function WorkoutSessionHistory({ sessions }: { sessions: CompletedWorkout
               <TableCell className="text-right"><span className="inline-flex items-center gap-1"><Clock3Icon className="size-4 text-muted-foreground" aria-hidden="true" />{session.durationMinutes} min</span></TableCell>
               <TableCell className="text-right">{session.completedSets}</TableCell>
               <TableCell className="text-right">{session.volume.toLocaleString("es-ES")} kg</TableCell>
-              <TableCell className="text-right"><Button type="button" variant="ghost" size="icon-sm" aria-label={`Eliminar sesión ${session.name} del ${session.completedAtLabel}`} onClick={() => setSelected(session)}><Trash2Icon aria-hidden="true" /></Button></TableCell>
+              <TableCell className="text-right"><span className="inline-flex gap-1"><Button asChild variant="ghost" size="icon-sm"><Link href={`/entrenamiento/historial/${session.id}`} aria-label={`Editar sesión ${session.name} del ${session.completedAtLabel}`}><PencilIcon aria-hidden="true" /></Link></Button><Button type="button" variant="ghost" size="icon-sm" aria-label={`Eliminar sesión ${session.name} del ${session.completedAtLabel}`} onClick={() => setSelected(session)}><Trash2Icon aria-hidden="true" /></Button></span></TableCell>
             </TableRow>
           ))}
         </TableBody>

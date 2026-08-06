@@ -110,7 +110,7 @@ export default async function PerformancePage() {
       ) : null}
 
       <Card>
-        <CardHeader><CardTitle>Historial de sesiones</CardTitle><CardDescription>Revisa tus entrenamientos completados o elimina un registro incorrecto.</CardDescription></CardHeader>
+        <CardHeader><CardTitle>Historial de sesiones</CardTitle><CardDescription>Revisa y corrige las series de tus entrenamientos completados.</CardDescription></CardHeader>
         <CardContent><WorkoutSessionHistory sessions={dashboard.sessions} /></CardContent>
       </Card>
 

@@ -4,12 +4,14 @@ import { revalidatePath } from "next/cache"
 import { z } from "zod"
 import { getAuthSession, hasBetterAuthEnv } from "@/lib/auth"
 import { systemQuery, withRlsUser } from "@/lib/db"
-import { guidedWorkoutFinishSchema, guidedWorkoutStartSchema, setLogsSchema, workoutSnapshotSchema } from "@/lib/validation/workout"
-import type { ActiveWorkoutSession, SetDraft } from "@/types/domain"
+import { completedWorkoutEditSchema, guidedWorkoutFinishSchema, guidedWorkoutStartSchema, setLogsSchema, workoutSnapshotSchema } from "@/lib/validation/workout"
+import { normalizeWorkoutLogs } from "@/lib/workout/guided"
+import type { ActiveWorkoutSession, CompletedWorkoutSessionDetail, SetDraft } from "@/types/domain"
 
 const sessionIdSchema = z.uuid()
 
 type ActiveSessionRow = { id: string; snapshot: unknown; started_at: Date }
+type CompletedSessionRow = ActiveSessionRow & { completed_at: Date }
 type SetLogRow = {
   id: string
   exercise_id: string
@@ -23,7 +25,7 @@ type SetLogRow = {
 }
 
 async function upsertLogs(db: { query: (text: string, values?: unknown[]) => Promise<unknown> }, athleteId: string, logs: SetDraft[]) {
-  for (const log of logs) {
+  for (const log of normalizeWorkoutLogs(logs)) {
     const completed = log.status === "completed"
     const skipped = log.status === "skipped"
     await db.query(
@@ -85,6 +87,115 @@ export async function loadActiveWorkoutSession(): Promise<ActiveWorkoutSession |
       })),
     }
   })
+}
+
+export async function loadCompletedWorkoutSession(input: unknown): Promise<CompletedWorkoutSessionDetail | null> {
+  const parsedId = sessionIdSchema.safeParse(input)
+  if (!parsedId.success || !hasBetterAuthEnv()) return null
+  const session = await getAuthSession()
+  if (!session) return null
+
+  return withRlsUser(session.user.id, async (db) => {
+    const result = await db.query<CompletedSessionRow>(
+      `select id::text,snapshot,started_at,coalesce(completed_at,updated_at) completed_at
+       from public.workout_sessions
+       where id=$1::uuid and athlete_id=$2::uuid and status='completed'
+         and coalesce(snapshot->>'kind','strength')='strength'`,
+      [parsedId.data, session.user.id],
+    )
+    const row = result.rows[0]
+    if (!row) return null
+    const workout = workoutSnapshotSchema.safeParse(row.snapshot)
+    if (!workout.success) return null
+    const logs = await db.query<SetLogRow>(
+      `select id::text,exercise_id::text,set_number,load_kg::text,reps,rir,completed,skipped,client_changed_at
+       from public.set_logs where workout_session_id=$1::uuid order by created_at,set_number`,
+      [row.id],
+    )
+
+    return {
+      sessionId: row.id,
+      workout: workout.data,
+      startedAt: row.started_at.toISOString(),
+      completedAt: row.completed_at.toISOString(),
+      logs: logs.rows.map((log) => ({
+        id: log.id,
+        workoutKey: workout.data.id,
+        sessionId: row.id,
+        exerciseId: log.exercise_id,
+        setNumber: log.set_number,
+        loadKg: log.load_kg === null ? null : Number(log.load_kg),
+        reps: log.reps,
+        rir: log.rir,
+        status: log.skipped ? "skipped" : log.completed ? "completed" : "skipped",
+        completed: log.completed,
+        clientChangedAt: log.client_changed_at.toISOString(),
+      })),
+    }
+  })
+}
+
+export async function updateCompletedWorkoutSession(input: unknown) {
+  const parsed = completedWorkoutEditSchema.safeParse(input)
+  if (!parsed.success) return { ok: false as const, error: parsed.error.issues[0]?.message ?? "Datos de entrenamiento no válidos" }
+  if (!hasBetterAuthEnv()) return { ok: false as const, error: "No hay sesiones guardadas en el modo demostración" }
+  const session = await getAuthSession()
+  if (!session) return { ok: false as const, error: "Sesión de usuario no válida" }
+  const normalizedLogs = normalizeWorkoutLogs(parsed.data.logs)
+
+  try {
+    await withRlsUser(session.user.id, async (db) => {
+      const workoutResult = await db.query<{ snapshot: unknown }>(
+        `select snapshot from public.workout_sessions
+         where id=$1::uuid and athlete_id=$2::uuid and status='completed'
+         for update`,
+        [parsed.data.sessionId, session.user.id],
+      )
+      const workout = workoutSnapshotSchema.safeParse(workoutResult.rows[0]?.snapshot)
+      if (!workout.success) throw new Error("La sesión no existe, no está completada o no te pertenece")
+
+      const allowedExercises = new Set(workout.data.exercises.map((exercise) => exercise.id))
+      const uniqueSets = new Set<string>()
+      for (const log of normalizedLogs) {
+        if (!allowedExercises.has(log.exerciseId)) throw new Error("Una serie contiene un ejercicio que no pertenece a esta sesión")
+        const key = `${log.exerciseId}:${log.setNumber}`
+        if (uniqueSets.has(key)) throw new Error("Hay dos series con el mismo número en un ejercicio")
+        uniqueSets.add(key)
+      }
+
+      const ids = normalizedLogs.map((log) => log.id)
+      await db.query(
+        `delete from public.set_logs
+         where workout_session_id=$1::uuid and athlete_id=$2::uuid and not (id=any($3::uuid[]))`,
+        [parsed.data.sessionId, session.user.id, ids],
+      )
+
+      for (const log of normalizedLogs) {
+        const saved = await db.query(
+          `insert into public.set_logs(id,workout_session_id,athlete_id,exercise_id,set_number,load_kg,reps,rir,completed,skipped,client_changed_at)
+           values($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,now())
+           on conflict(id) do update set exercise_id=excluded.exercise_id,set_number=excluded.set_number,
+             load_kg=excluded.load_kg,reps=excluded.reps,rir=excluded.rir,completed=excluded.completed,
+             skipped=excluded.skipped,client_changed_at=now(),updated_at=now()
+           where public.set_logs.workout_session_id=excluded.workout_session_id
+             and public.set_logs.athlete_id=excluded.athlete_id
+           returning id`,
+          [log.id, parsed.data.sessionId, session.user.id, log.exerciseId, log.setNumber, log.loadKg, log.reps, log.rir, log.status === "completed", log.status === "skipped"],
+        )
+        if (!saved.rowCount) throw new Error("No se pudo guardar una de las series")
+      }
+
+      await db.query(
+        "update public.workout_sessions set updated_at=now() where id=$1::uuid and athlete_id=$2::uuid",
+        [parsed.data.sessionId, session.user.id],
+      )
+    })
+  } catch (error) {
+    return { ok: false as const, error: error instanceof Error ? error.message : "No se pudo actualizar el entrenamiento" }
+  }
+
+  revalidateWorkoutPaths()
+  return { ok: true as const }
 }
 
 export async function startWorkoutSession(input: unknown) {
@@ -166,15 +277,16 @@ export async function syncSetLogs(input: unknown, snapshotInput: unknown) {
 export async function finishGuidedWorkout(input: unknown) {
   const parsed = guidedWorkoutFinishSchema.safeParse(input)
   if (!parsed.success) return { ok: false as const, error: "Faltan datos válidos para finalizar" }
-  const completedLogs = parsed.data.logs.filter((log) => log.status === "completed")
-  if (!completedLogs.length || completedLogs.some((log) => log.loadKg === null || log.reps === null)) {
-    return { ok: false as const, error: "Completa al menos una serie con kilos y repeticiones" }
+  const normalizedLogs = normalizeWorkoutLogs(parsed.data.logs, true)
+  const completedLogs = normalizedLogs.filter((log) => log.status === "completed")
+  if (completedLogs.some((log) => log.loadKg === null || log.reps === null)) {
+    return { ok: false as const, error: "Las series completadas necesitan kilos y repeticiones" }
   }
-  if (!hasBetterAuthEnv()) return { ok: true as const, synced: parsed.data.logs.length }
+  if (!hasBetterAuthEnv()) return { ok: true as const, synced: normalizedLogs.length }
   const session = await getAuthSession()
   if (!session) return { ok: false as const, error: "Sesión de usuario no válida" }
-  const sessionId = parsed.data.logs[0]?.sessionId
-  if (!sessionId || parsed.data.logs.some((log) => log.sessionId !== sessionId)) return { ok: false as const, error: "Las series no pertenecen a la misma sesión" }
+  const sessionId = normalizedLogs[0]?.sessionId
+  if (!sessionId || normalizedLogs.some((log) => log.sessionId !== sessionId)) return { ok: false as const, error: "Las series no pertenecen a la misma sesión" }
   try {
     await withRlsUser(session.user.id, async (db) => {
       const existing = await db.query<{ status: string }>(
@@ -193,10 +305,10 @@ export async function finishGuidedWorkout(input: unknown) {
         await db.query(
           `insert into public.workout_sessions(id,athlete_id,status,snapshot,started_at)
            values($1::uuid,$2::uuid,'in_progress',$3::jsonb,$4::timestamptz)`,
-          [sessionId, session.user.id, JSON.stringify({ ...parsed.data.workout, kind: "strength" }), parsed.data.logs.map((log) => log.clientChangedAt).sort()[0]],
+          [sessionId, session.user.id, JSON.stringify({ ...parsed.data.workout, kind: "strength" }), normalizedLogs.map((log) => log.clientChangedAt).sort()[0]],
         )
       }
-      await upsertLogs(db, session.user.id, parsed.data.logs)
+      await upsertLogs(db, session.user.id, normalizedLogs)
       await db.query(
         `update public.workout_sessions set status='completed',completed_at=$3::timestamptz,updated_at=now()
          where id=$1::uuid and athlete_id=$2::uuid and status='in_progress'`,
@@ -207,7 +319,7 @@ export async function finishGuidedWorkout(input: unknown) {
     return { ok: false as const, error: error instanceof Error ? error.message : "No se pudo finalizar" }
   }
   revalidateWorkoutPaths()
-  return { ok: true as const, synced: parsed.data.logs.length }
+  return { ok: true as const, synced: normalizedLogs.length }
 }
 
 export async function finishWorkoutSession(input: unknown, snapshotInput: unknown) {

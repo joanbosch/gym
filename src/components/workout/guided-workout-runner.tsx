@@ -35,7 +35,7 @@ import {
   saveLocalGuidedWorkout,
   storeDraft,
 } from "@/lib/offline/workout-drafts"
-import { createGuidedLogs, firstPendingStep, guidedWorkoutVolume, mergeGuidedLogs, orderedGuidedLogs } from "@/lib/workout/guided"
+import { createGuidedLogs, firstPendingStep, guidedWorkoutVolume, mergeGuidedLogs, normalizeWorkoutLogs, orderedGuidedLogs } from "@/lib/workout/guided"
 import type { ActiveWorkoutSession, LocalGuidedWorkout, SetDraft } from "@/types/domain"
 
 function formatDuration(totalSeconds: number) {
@@ -190,15 +190,25 @@ export function GuidedWorkoutRunner({ initialRemote }: { initialRemote: ActiveWo
   const saveAndNext = () => {
     setAttempted(true)
     if (!currentLog || !currentExercise || currentLog.loadKg === null || currentLog.reps === null) return
-    const changed: SetDraft = { ...currentLog, status: "completed", completed: true, clientChangedAt: new Date().toISOString() }
+    const changed = normalizeWorkoutLogs([{ ...currentLog, status: "completed", completed: true, clientChangedAt: new Date().toISOString() }])[0]
     const nextLogs = logs.map((log) => log.id === changed.id ? changed : log)
-    void moveAfter(nextLogs, currentExercise.restSeconds)
+    if (changed.status === "skipped") toast.info("Serie omitida: 0 kg o 0 repeticiones no cuentan para los KPIs")
+    void moveAfter(nextLogs, changed.status === "completed" ? currentExercise.restSeconds : 0)
   }
 
   const skipAndNext = () => {
     if (!currentLog) return
     const changed: SetDraft = { ...currentLog, status: "skipped", completed: false, clientChangedAt: new Date().toISOString() }
     const nextLogs = logs.map((log) => log.id === changed.id ? changed : log)
+    void moveAfter(nextLogs, 0)
+  }
+
+  const skipExercise = () => {
+    if (!currentExercise) return
+    const changedAt = new Date().toISOString()
+    const nextLogs = logs.map((log): SetDraft => log.exerciseId === currentExercise.id && log.status === "pending"
+      ? { ...log, status: "skipped", completed: false, clientChangedAt: changedAt }
+      : log)
     void moveAfter(nextLogs, 0)
   }
 
@@ -235,14 +245,15 @@ export function GuidedWorkoutRunner({ initialRemote }: { initialRemote: ActiveWo
     if (!session) return
     startTransition(async () => {
       const completedAt = new Date().toISOString()
+      const finalLogs = normalizeWorkoutLogs(ordered, true)
       if (!online) {
-        await persist({ ...session, completedAt, syncState: "completion_pending", currentStep: ordered.length })
+        await persist({ ...session, completedAt, syncState: "completion_pending", currentStep: finalLogs.length }, finalLogs)
         toast.success("Entrenamiento finalizado en este dispositivo")
         return
       }
-      const result = await finishGuidedWorkout({ logs: ordered, workout: session.workout, completedAt })
+      const result = await finishGuidedWorkout({ logs: finalLogs, workout: session.workout, completedAt })
       if (!result.ok) {
-        await persist({ ...session, completedAt, syncState: "completion_pending", currentStep: ordered.length })
+        await persist({ ...session, completedAt, syncState: "completion_pending", currentStep: finalLogs.length }, finalLogs)
         toast.warning("Finalizado localmente; queda pendiente de sincronizar")
         return
       }
@@ -387,20 +398,20 @@ export function GuidedWorkoutRunner({ initialRemote }: { initialRemote: ActiveWo
         </nav>
 
         {isSummary ? (
-          <Card><CardHeader><CheckIcon aria-hidden="true" /><CardTitle>Resumen del entrenamiento</CardTitle><CardDescription>Revisa los resultados antes de cerrar la sesión.</CardDescription></CardHeader><CardContent className="grid gap-3 sm:grid-cols-3"><div><p className="text-sm text-muted-foreground">Series completadas</p><p className="text-2xl font-semibold">{completed}</p></div><div><p className="text-sm text-muted-foreground">Series omitidas</p><p className="text-2xl font-semibold">{skipped}</p></div><div><p className="text-sm text-muted-foreground">Volumen</p><p className="text-2xl font-semibold">{guidedWorkoutVolume(ordered).toLocaleString("es-ES")} kg</p></div></CardContent><CardFooter className="flex-wrap gap-2"><Button size="lg" onClick={finish} disabled={pending || completed === 0 || unresolved}><CheckIcon data-icon="inline-start" />Finalizar entrenamiento</Button>{unresolved ? <Button variant="outline" onClick={() => goTo(firstPendingStep(ordered))}>Completar pendientes</Button> : null}</CardFooter></Card>
+          <Card><CardHeader><CheckIcon aria-hidden="true" /><CardTitle>Resumen del entrenamiento</CardTitle><CardDescription>{unresolved ? "Las series pendientes se guardarán como omitidas y no contarán para los KPIs." : "Revisa los resultados antes de cerrar la sesión."}</CardDescription></CardHeader><CardContent className="grid gap-3 sm:grid-cols-3"><div><p className="text-sm text-muted-foreground">Series completadas</p><p className="text-2xl font-semibold">{completed}</p></div><div><p className="text-sm text-muted-foreground">Series omitidas</p><p className="text-2xl font-semibold">{skipped + (unresolved ? ordered.filter((log) => log.status === "pending").length : 0)}</p></div><div><p className="text-sm text-muted-foreground">Volumen</p><p className="text-2xl font-semibold">{guidedWorkoutVolume(ordered).toLocaleString("es-ES")} kg</p></div></CardContent><CardFooter className="flex-wrap gap-2"><Button size="lg" onClick={finish} disabled={pending}><CheckIcon data-icon="inline-start" />Finalizar entrenamiento</Button>{unresolved ? <Button variant="outline" onClick={() => goTo(firstPendingStep(ordered))}>Completar pendientes</Button> : null}</CardFooter></Card>
         ) : currentLog && currentExercise ? (
           <Card>
             <CardHeader><Badge variant="outline">Ejercicio {session.workout.exercises.findIndex((exercise) => exercise.id === currentExercise.id) + 1} de {session.workout.exercises.length}</Badge><CardTitle className="text-2xl">{currentExercise.name}</CardTitle><CardDescription>Serie {currentLog.setNumber} · {currentExercise.repMin}–{currentExercise.repMax} repeticiones · RIR {currentExercise.targetRir} · descanso {currentExercise.restSeconds}s</CardDescription></CardHeader>
             <CardContent className="flex flex-col gap-5">
               <div className="flex flex-wrap items-center gap-2">{currentExercise.loadSuggestion !== undefined ? <Badge>{currentExercise.loadSuggestion.toLocaleString("es-ES")} kg sugeridos</Badge> : null}{currentExercise.videoUrl ? <ExerciseVideoDialog name={currentExercise.name} videoUrl={currentExercise.videoUrl} /> : null}</div>
               <p className="text-sm text-muted-foreground">{currentExercise.cue}</p>
-              <FieldSet><FieldLegend>Resultado de la serie</FieldLegend><FieldDescription>Introduce los datos cuando termines. Kilos y repeticiones son obligatorios.</FieldDescription><FieldGroup className="grid sm:grid-cols-3">
+              <FieldSet><FieldLegend>Resultado de la serie</FieldLegend><FieldDescription>Introduce los datos cuando termines. Una carga o repeticiones de 0 guardarán la serie como omitida y no contará para los KPIs.</FieldDescription><FieldGroup className="grid sm:grid-cols-3">
                 <Field data-invalid={invalidLoad || undefined}><FieldLabel htmlFor={`${currentLog.id}-load`}>Carga</FieldLabel><InputGroup><InputGroupInput id={`${currentLog.id}-load`} type="number" inputMode="decimal" min="0" max="1000" step="0.5" value={currentLog.loadKg ?? ""} aria-invalid={invalidLoad || undefined} onChange={(event) => updateCurrent({ loadKg: event.target.value === "" ? null : Number(event.target.value), status: "pending", completed: false })} /><InputGroupAddon align="inline-end"><InputGroupText>kg</InputGroupText></InputGroupAddon></InputGroup>{invalidLoad ? <FieldError>Indica los kilos; usa 0 para peso corporal.</FieldError> : null}</Field>
                 <Field data-invalid={invalidReps || undefined}><FieldLabel htmlFor={`${currentLog.id}-reps`}>Repeticiones</FieldLabel><InputGroup><InputGroupInput id={`${currentLog.id}-reps`} type="number" inputMode="numeric" min="0" max="1000" value={currentLog.reps ?? ""} aria-invalid={invalidReps || undefined} onChange={(event) => updateCurrent({ reps: event.target.value === "" ? null : Number(event.target.value), status: "pending", completed: false })} /><InputGroupAddon align="inline-end"><InputGroupText>reps</InputGroupText></InputGroupAddon></InputGroup>{invalidReps ? <FieldError>Indica las repeticiones realizadas.</FieldError> : null}</Field>
                 <Field><FieldLabel htmlFor={`${currentLog.id}-rir`}>RIR opcional</FieldLabel><InputGroup><InputGroupInput id={`${currentLog.id}-rir`} type="number" inputMode="numeric" min="0" max="4" value={currentLog.rir ?? ""} onChange={(event) => updateCurrent({ rir: event.target.value === "" ? null : Number(event.target.value), status: "pending", completed: false })} /><InputGroupAddon align="inline-end"><InputGroupText>RIR</InputGroupText></InputGroupAddon></InputGroup></Field>
               </FieldGroup></FieldSet>
             </CardContent>
-            <CardFooter className="flex-wrap gap-2"><Button size="lg" onClick={saveAndNext}>{currentLog.status === "completed" ? "Guardar cambios y siguiente" : "Guardar serie y siguiente"}<ArrowRightIcon data-icon="inline-end" /></Button><Button variant="outline" onClick={skipAndNext}><SkipForwardIcon data-icon="inline-start" />Saltar serie</Button><Button variant="ghost" onClick={addSet}><PlusIcon data-icon="inline-start" />Añadir serie</Button></CardFooter>
+            <CardFooter className="flex-wrap gap-2"><Button size="lg" onClick={saveAndNext}>{currentLog.status === "completed" ? "Guardar cambios y siguiente" : "Guardar serie y siguiente"}<ArrowRightIcon data-icon="inline-end" /></Button><Button variant="outline" onClick={skipAndNext}><SkipForwardIcon data-icon="inline-start" />Saltar serie</Button><Button variant="outline" onClick={skipExercise}><SkipForwardIcon data-icon="inline-start" />Saltar ejercicio</Button><Button variant="ghost" onClick={addSet}><PlusIcon data-icon="inline-start" />Añadir serie</Button></CardFooter>
           </Card>
         ) : null}
 

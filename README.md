@@ -1,36 +1,84 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Gym Joan
 
-## Getting Started
+Aplicación privada para planificar, ejecutar y medir un programa de mejora física. Incluye Better Auth con email, contraseña y Passkeys; roles de administrador, entrenador y atleta; constructor versionado; registro serie a serie con borrador offline; progreso, nutrición, cardio, fotografías privadas y correo transaccional.
 
-First, run the development server:
+## Desarrollo local
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
+pnpm install
+cp .env.example .env.local
+export SUPABASE_DB_URL='postgresql://postgres.PROJECT_REF:CONTRASEÑA@aws-1-eu-west-1.pooler.supabase.com:5432/postgres'
+export DATABASE_URL="$SUPABASE_DB_URL"
+pnpm supabase:push
 pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Sin variables de Supabase la interfaz entra en modo demostración. Las mutaciones no escriben datos reales.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Supabase
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+La aplicación trabaja exclusivamente contra Supabase remoto mediante Session Pooler; no necesita Docker ni una base local. Nunca guardes `DATABASE_URL` o `SUPABASE_DB_URL` en Git ni las expongas al navegador. Las migraciones activan RLS en todas las tablas públicas. `supabase/seed.sql` carga la biblioteca de ejercicios y crea el plan de Joan si ya existe un entrenador o administrador. Para aplicar migraciones y seed:
 
-## Learn More
+```bash
+pnpm supabase:push
+pnpm supabase:seed
+```
 
-To learn more about Next.js, take a look at the following resources:
+Si las cuentas se crean después del seed, ejecuta:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```sql
+select public.seed_joan_program('UUID_DEL_ENTRENADOR');
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+El primer administrador se prepara con:
 
-## Deploy on Vercel
+```bash
+pnpm bootstrap:admin
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+El script crea una contraseña aleatoria que nunca muestra ni registra y deja un enlace de activación de un solo uso en `email_outbox`.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Better Auth y Passkeys
+
+- `BETTER_AUTH_SECRET` debe tener al menos 32 caracteres y ser distinto por entorno.
+- `BETTER_AUTH_URL` y `NEXT_PUBLIC_SITE_URL` deben apuntar al mismo origen.
+- Producción usa `https://gym.joanbosch.dev` como RP ID WebAuthn.
+- Local usa `localhost`; las previews de Vercel mantienen Passkeys independientes.
+- El registro público está desactivado. Un administrador crea la cuenta y Better Auth envía la activación mediante la cola de Resend.
+- El usuario puede registrar, consultar y eliminar Passkeys desde `/seguridad`.
+- La contraseña tiene entre 12 y 256 caracteres, y todas las sesiones se revocan al restablecerla.
+
+Cuando cambien los plugins de Better Auth, regenera su migración y revisa el diff antes de aplicarla:
+
+```bash
+pnpm auth:generate
+pnpm supabase:push
+```
+
+## Vercel
+
+1. Importa el repositorio y usa `pnpm build`.
+2. Configura variables distintas en Development/Preview y Production.
+3. Usa un proyecto Supabase de desarrollo para previews y otro para producción.
+4. Añade `gym.joanbosch.dev` al proyecto y fija `NEXT_PUBLIC_SITE_URL=https://gym.joanbosch.dev` en Production.
+5. Configura `BETTER_AUTH_URL`, `BETTER_AUTH_SECRET` y `DATABASE_URL` por entorno. Supabase Auth ya no gestiona las sesiones de la aplicación.
+
+## Resend
+
+1. Verifica `mail.joanbosch.dev` y copia exactamente sus registros DKIM, SPF/Return-Path y MX en el DNS autoritativo. No publiques dos registros SPF.
+2. Configura el webhook `https://gym.joanbosch.dev/api/webhooks/resend` para eventos `email.sent`, `email.delivered`, `email.bounced`, `email.complained`, `email.failed` y `email.suppressed`.
+3. Guarda la firma como `RESEND_WEBHOOK_SECRET` y usa el mismo `EMAIL_PROCESSOR_SECRET` en Vercel y la Edge Function.
+4. Despliega `supabase/functions/process-email-outbox` con `APP_URL=https://gym.joanbosch.dev`.
+5. Crea los secretos de Vault indicados en la migración de Cron y habilita el job comentado.
+6. Usa `Gym Joan <notificaciones@mail.joanbosch.dev>` como remitente. Mantén `EMAIL_DELIVERY_MODE=log` en local/previews y `resend` solo en producción.
+
+Previsualiza las plantillas con `pnpm email:dev`. Usa `delivered@resend.dev`, `bounced@resend.dev` y `complained@resend.dev` para pruebas; no inventes direcciones reales.
+
+## Calidad
+
+```bash
+pnpm lint
+pnpm typecheck
+pnpm test
+pnpm build
+```

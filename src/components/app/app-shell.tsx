@@ -18,6 +18,7 @@ import {
   UsersIcon,
 } from "lucide-react"
 import { logout } from "@/actions/auth"
+import { ActiveWorkoutBanner } from "@/components/workout/active-workout-banner"
 import { ThemeToggle } from "@/components/app/theme-toggle"
 import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
@@ -37,7 +38,7 @@ import {
   SidebarProvider,
   SidebarTrigger,
 } from "@/components/ui/sidebar"
-import type { AppRole, Profile } from "@/types/domain"
+import type { ActiveWorkoutSession, AppRole, Profile } from "@/types/domain"
 
 const athleteItems = [
   ["/hoy", "Hoy", LayoutDashboardIcon],
@@ -74,7 +75,7 @@ const roleItems: Record<AppRole, typeof athleteItems | ReadonlyArray<readonly [s
 
 const roleLabel = { athlete: "Atleta", coach: "Entrenador", admin: "Administrador" }
 
-export function AppShell({ profile, children }: { profile: Profile; children: React.ReactNode }) {
+export function AppShell({ profile, activeWorkout, children }: { profile: Profile; activeWorkout: ActiveWorkoutSession | null; children: React.ReactNode }) {
   const pathname = usePathname()
   const items = roleItems[profile.role]
   const initials = profile.fullName.split(" ").map((part) => part[0]).join("").slice(0, 2).toUpperCase()
@@ -140,7 +141,7 @@ export function AppShell({ profile, children }: { profile: Profile; children: Re
           </div>
           <ThemeToggle />
         </header>
-        <main className="flex flex-1 flex-col gap-6 p-4 pb-24 md:p-6 md:pb-8">{children}</main>
+        <main className="flex flex-1 flex-col gap-6 p-4 pb-24 md:p-6 md:pb-8"><ActiveWorkoutBanner initialRemote={activeWorkout} />{children}</main>
         <nav className="safe-bottom fixed inset-x-0 bottom-0 border-t bg-background md:hidden" aria-label="Navegación móvil">
           <div className="grid grid-cols-5">
             {mobileItems.map(([href, label, Icon]) => (

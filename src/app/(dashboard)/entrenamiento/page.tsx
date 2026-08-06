@@ -1,11 +1,12 @@
 import Link from "next/link"
 import { CheckIcon, Clock3Icon, DumbbellIcon } from "lucide-react"
 import { PageHeading } from "@/components/dashboard/page-heading"
-import { WorkoutRunner } from "@/components/workout/workout-runner"
+import { GuidedWorkoutLauncher } from "@/components/workout/guided-workout-launcher"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { upperA, workouts } from "@/lib/demo-data"
 import { enrichWorkoutWithPerformance } from "@/lib/training/performance"
+import { loadActiveWorkoutSession } from "@/actions/workout"
 
 export const metadata = { title: "Entrenamiento" }
 
@@ -16,7 +17,7 @@ export default async function WorkoutPage({
 }) {
   const requestedSession = (await searchParams).sesion
   const selectedWorkout = workouts.find((workout) => workout.id === requestedSession) ?? upperA
-  const workout = await enrichWorkoutWithPerformance(selectedWorkout)
+  const [workout, remoteActive] = await Promise.all([enrichWorkoutWithPerformance(selectedWorkout), loadActiveWorkoutSession()])
 
   return (
     <>
@@ -55,7 +56,7 @@ export default async function WorkoutPage({
           })}
         </div>
       </section>
-      <WorkoutRunner key={workout.id} workout={workout} />
+      <Card><CardHeader><CardTitle>{workout.name}</CardTitle><CardDescription>{workout.subtitle} · {workout.exercises.length} ejercicios · {workout.exercises.reduce((total, exercise) => total + exercise.sets, 0)} series</CardDescription></CardHeader><CardContent><GuidedWorkoutLauncher workout={workout} remoteActive={remoteActive} /></CardContent></Card>
     </>
   )
 }

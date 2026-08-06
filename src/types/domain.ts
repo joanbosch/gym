@@ -51,8 +51,29 @@ export interface SetDraft {
   loadKg: number | null
   reps: number | null
   rir: number | null
+  status: "pending" | "completed" | "skipped"
   completed: boolean
   clientChangedAt: string
+}
+
+export type GuidedWorkoutSyncState = "active" | "completion_pending" | "synced"
+
+export interface LocalGuidedWorkout {
+  workoutKey: string
+  sessionId: string
+  workout: PlannedWorkout
+  startedAt: string
+  completedAt: string | null
+  currentStep: number
+  restEndsAt: string | null
+  syncState: GuidedWorkoutSyncState
+}
+
+export interface ActiveWorkoutSession {
+  sessionId: string
+  workout: PlannedWorkout
+  startedAt: string
+  logs: SetDraft[]
 }
 
 export interface ProgressPoint {

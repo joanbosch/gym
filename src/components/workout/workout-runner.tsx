@@ -37,6 +37,7 @@ function createInitialLogs(workout: PlannedWorkout, sessionId: string): SetDraft
       loadKg: null,
       reps: null,
       rir: null,
+      status: "pending",
       completed: false,
       clientChangedAt: new Date().toISOString(),
     })),
@@ -110,7 +111,7 @@ export function WorkoutRunner({ workout }: { workout: PlannedWorkout }) {
   }
 
   const completeSet = (log: SetDraft, restSeconds: number, value: boolean) => {
-    updateLog(log.id, { completed: value })
+    updateLog(log.id, { completed: value, status: value ? "completed" : "pending" })
     if (value) setRestRemaining(restSeconds)
   }
 
@@ -131,6 +132,7 @@ export function WorkoutRunner({ workout }: { workout: PlannedWorkout }) {
       ...last,
       id: crypto.randomUUID(),
       setNumber: last.setNumber + 1,
+      status: "pending",
       completed: false,
       clientChangedAt: new Date().toISOString(),
     }

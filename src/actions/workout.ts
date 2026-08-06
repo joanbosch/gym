@@ -4,11 +4,124 @@ import { revalidatePath } from "next/cache"
 import { z } from "zod"
 import { getAuthSession, hasBetterAuthEnv } from "@/lib/auth"
 import { systemQuery, withRlsUser } from "@/lib/db"
-import { setLogsSchema, workoutSnapshotSchema } from "@/lib/validation/workout"
+import { guidedWorkoutFinishSchema, guidedWorkoutStartSchema, setLogsSchema, workoutSnapshotSchema } from "@/lib/validation/workout"
+import type { ActiveWorkoutSession, SetDraft } from "@/types/domain"
 
 const sessionIdSchema = z.uuid()
 
-export async function syncSetLogs(input: unknown, snapshotInput: unknown) {
+type ActiveSessionRow = { id: string; snapshot: unknown; started_at: Date }
+type SetLogRow = {
+  id: string
+  exercise_id: string
+  set_number: number
+  load_kg: string | null
+  reps: number | null
+  rir: number | null
+  completed: boolean
+  skipped: boolean
+  client_changed_at: Date
+}
+
+async function upsertLogs(db: { query: (text: string, values?: unknown[]) => Promise<unknown> }, athleteId: string, logs: SetDraft[]) {
+  for (const log of logs) {
+    const completed = log.status === "completed"
+    const skipped = log.status === "skipped"
+    await db.query(
+      `insert into public.set_logs(id,workout_session_id,athlete_id,exercise_id,set_number,load_kg,reps,rir,completed,skipped,client_changed_at)
+       values($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10,$11::timestamptz)
+       on conflict(id) do update set load_kg=excluded.load_kg,reps=excluded.reps,rir=excluded.rir,
+         completed=excluded.completed,skipped=excluded.skipped,client_changed_at=excluded.client_changed_at,updated_at=now()
+       where public.set_logs.client_changed_at <= excluded.client_changed_at`,
+      [log.id, log.sessionId, athleteId, log.exerciseId, log.setNumber, log.loadKg, log.reps, log.rir, completed, skipped, log.clientChangedAt],
+    )
+  }
+}
+
+function revalidateWorkoutPaths() {
+  revalidatePath("/entrenamiento")
+  revalidatePath("/entrenamiento/activo")
+  revalidatePath("/hoy")
+  revalidatePath("/rendimiento")
+  revalidatePath("/progreso")
+}
+
+export async function loadActiveWorkoutSession(): Promise<ActiveWorkoutSession | null> {
+  if (!hasBetterAuthEnv()) return null
+  const session = await getAuthSession()
+  if (!session) return null
+  return withRlsUser(session.user.id, async (db) => {
+    const active = await db.query<ActiveSessionRow>(
+      `select id::text,snapshot,started_at
+       from public.workout_sessions
+       where athlete_id=$1::uuid and status='in_progress' and coalesce(snapshot->>'kind','strength')='strength'
+       order by started_at desc limit 1`,
+      [session.user.id],
+    )
+    const row = active.rows[0]
+    if (!row) return null
+    const parsedWorkout = workoutSnapshotSchema.safeParse(row.snapshot)
+    if (!parsedWorkout.success) return null
+    const result = await db.query<SetLogRow>(
+      `select id::text,exercise_id::text,set_number,load_kg::text,reps,rir,completed,skipped,client_changed_at
+       from public.set_logs where workout_session_id=$1::uuid order by created_at,set_number`,
+      [row.id],
+    )
+    return {
+      sessionId: row.id,
+      workout: parsedWorkout.data,
+      startedAt: row.started_at.toISOString(),
+      logs: result.rows.map((log) => ({
+        id: log.id,
+        workoutKey: parsedWorkout.data.id,
+        sessionId: row.id,
+        exerciseId: log.exercise_id,
+        setNumber: log.set_number,
+        loadKg: log.load_kg === null ? null : Number(log.load_kg),
+        reps: log.reps,
+        rir: log.rir,
+        status: log.skipped ? "skipped" : log.completed ? "completed" : "pending",
+        completed: log.completed,
+        clientChangedAt: log.client_changed_at.toISOString(),
+      })),
+    }
+  })
+}
+
+export async function startWorkoutSession(input: unknown) {
+  const parsed = guidedWorkoutStartSchema.safeParse(input)
+  if (!parsed.success) return { ok: false as const, error: "Entrenamiento no válido" }
+  if (!hasBetterAuthEnv()) return { ok: true as const, sessionId: parsed.data.sessionId, resumed: false }
+  const session = await getAuthSession()
+  if (!session) return { ok: false as const, error: "Sesión de usuario no válida" }
+  const workout = { ...parsed.data.workout, kind: "strength" as const }
+  try {
+    return await withRlsUser(session.user.id, async (db) => {
+      await db.query("select pg_advisory_xact_lock(hashtext($1))", [session.user.id])
+      const active = await db.query<{ id: string }>(
+        `select id::text from public.workout_sessions
+         where athlete_id=$1::uuid and status='in_progress' and coalesce(snapshot->>'kind','strength')='strength'
+         order by started_at desc limit 1`,
+        [session.user.id],
+      )
+      const activeId = active.rows[0]?.id
+      if (activeId && activeId !== parsed.data.sessionId) {
+        return { ok: false as const, conflict: true as const, activeSessionId: activeId, error: "Ya tienes un entrenamiento activo" }
+      }
+      if (!activeId) {
+        await db.query(
+          `insert into public.workout_sessions(id,athlete_id,status,snapshot,started_at)
+           values($1::uuid,$2::uuid,'in_progress',$3::jsonb,$4::timestamptz)`,
+          [parsed.data.sessionId, session.user.id, JSON.stringify(workout), parsed.data.startedAt],
+        )
+      }
+      return { ok: true as const, sessionId: parsed.data.sessionId, resumed: Boolean(activeId) }
+    })
+  } catch (error) {
+    return { ok: false as const, error: error instanceof Error ? error.message : "No se pudo iniciar el entrenamiento" }
+  }
+}
+
+export async function syncWorkoutProgress(input: unknown, snapshotInput: unknown) {
   const logs = setLogsSchema.parse(input)
   const snapshot = workoutSnapshotSchema.parse(snapshotInput)
   if (!hasBetterAuthEnv()) return { ok: true, synced: logs.length, demo: true }
@@ -25,45 +138,100 @@ export async function syncSetLogs(input: unknown, snapshotInput: unknown) {
       const existing = await db.query<{ status: string }>("select status::text from public.workout_sessions where id=$1::uuid", [sessionId])
       if (existing.rows[0]?.status === "completed") throw new Error("Esta sesión ya está finalizada en el servidor")
       if (!existing.rowCount) {
+        const otherActive = await db.query<{ id: string }>(
+          `select id::text from public.workout_sessions
+           where athlete_id=$1::uuid and status='in_progress' and id<>$2::uuid and coalesce(snapshot->>'kind','strength')='strength'
+           limit 1`,
+          [athleteId, sessionId],
+        )
+        if (otherActive.rowCount) throw new Error("Hay otro entrenamiento activo en Supabase")
         await db.query(
           "insert into public.workout_sessions(id,athlete_id,status,snapshot) values($1::uuid,$2::uuid,'in_progress',$3::jsonb)",
           [sessionId, athleteId, JSON.stringify(strengthSnapshot)],
         )
       }
-      for (const log of logs) {
-        await db.query(
-          `insert into public.set_logs(id,workout_session_id,athlete_id,exercise_id,set_number,load_kg,reps,rir,completed,client_changed_at)
-           values($1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7,$8,$9,$10::timestamptz)
-           on conflict(id) do update set load_kg=excluded.load_kg,reps=excluded.reps,rir=excluded.rir,completed=excluded.completed,client_changed_at=excluded.client_changed_at,updated_at=now()
-           where public.set_logs.client_changed_at <= excluded.client_changed_at`,
-          [log.id, log.sessionId, athleteId, log.exerciseId, log.setNumber, log.loadKg, log.reps, log.rir, log.completed, log.clientChangedAt],
-        )
-      }
+      await upsertLogs(db, athleteId, logs)
     })
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : "No se pudo sincronizar" }
   }
-  revalidatePath("/entrenamiento")
+  revalidateWorkoutPaths()
   return { ok: true, synced: logs.length }
+}
+
+export async function syncSetLogs(input: unknown, snapshotInput: unknown) {
+  return syncWorkoutProgress(input, snapshotInput)
+}
+
+export async function finishGuidedWorkout(input: unknown) {
+  const parsed = guidedWorkoutFinishSchema.safeParse(input)
+  if (!parsed.success) return { ok: false as const, error: "Faltan datos válidos para finalizar" }
+  const completedLogs = parsed.data.logs.filter((log) => log.status === "completed")
+  if (!completedLogs.length || completedLogs.some((log) => log.loadKg === null || log.reps === null)) {
+    return { ok: false as const, error: "Completa al menos una serie con kilos y repeticiones" }
+  }
+  if (!hasBetterAuthEnv()) return { ok: true as const, synced: parsed.data.logs.length }
+  const session = await getAuthSession()
+  if (!session) return { ok: false as const, error: "Sesión de usuario no válida" }
+  const sessionId = parsed.data.logs[0]?.sessionId
+  if (!sessionId || parsed.data.logs.some((log) => log.sessionId !== sessionId)) return { ok: false as const, error: "Las series no pertenecen a la misma sesión" }
+  try {
+    await withRlsUser(session.user.id, async (db) => {
+      const existing = await db.query<{ status: string }>(
+        "select status::text from public.workout_sessions where id=$1::uuid and athlete_id=$2::uuid",
+        [sessionId, session.user.id],
+      )
+      if (existing.rows[0]?.status === "completed") return
+      if (!existing.rowCount) {
+        const otherActive = await db.query<{ id: string }>(
+          `select id::text from public.workout_sessions
+           where athlete_id=$1::uuid and status='in_progress' and id<>$2::uuid and coalesce(snapshot->>'kind','strength')='strength'
+           limit 1`,
+          [session.user.id, sessionId],
+        )
+        if (otherActive.rowCount) throw new Error("Hay otro entrenamiento activo en Supabase")
+        await db.query(
+          `insert into public.workout_sessions(id,athlete_id,status,snapshot,started_at)
+           values($1::uuid,$2::uuid,'in_progress',$3::jsonb,$4::timestamptz)`,
+          [sessionId, session.user.id, JSON.stringify({ ...parsed.data.workout, kind: "strength" }), parsed.data.logs.map((log) => log.clientChangedAt).sort()[0]],
+        )
+      }
+      await upsertLogs(db, session.user.id, parsed.data.logs)
+      await db.query(
+        `update public.workout_sessions set status='completed',completed_at=$3::timestamptz,updated_at=now()
+         where id=$1::uuid and athlete_id=$2::uuid and status='in_progress'`,
+        [sessionId, session.user.id, parsed.data.completedAt],
+      )
+    })
+  } catch (error) {
+    return { ok: false as const, error: error instanceof Error ? error.message : "No se pudo finalizar" }
+  }
+  revalidateWorkoutPaths()
+  return { ok: true as const, synced: parsed.data.logs.length }
 }
 
 export async function finishWorkoutSession(input: unknown, snapshotInput: unknown) {
   const logs = setLogsSchema.parse(input)
-  const synced = await syncSetLogs(logs, snapshotInput)
-  if (!synced.ok || !logs.length || !hasBetterAuthEnv()) return synced
+  return finishGuidedWorkout({ logs, workout: snapshotInput, completedAt: new Date().toISOString() })
+}
+
+export async function discardWorkoutSession(input: unknown) {
+  const parsed = sessionIdSchema.safeParse(input)
+  if (!parsed.success) return { ok: false as const, error: "Sesión no válida" }
+  if (!hasBetterAuthEnv()) return { ok: true as const }
   const session = await getAuthSession()
-  if (!session) return { ok: false, error: "Sesión no válida" }
+  if (!session) return { ok: false as const, error: "Sesión de usuario no válida" }
   try {
     await withRlsUser(session.user.id, (db) => db.query(
-      "update public.workout_sessions set status='completed',completed_at=now(),updated_at=now() where id=$1::uuid and athlete_id=$2::uuid and status<>'completed'",
-      [logs[0].sessionId, session.user.id],
+      `update public.workout_sessions set status='skipped',updated_at=now()
+       where id=$1::uuid and athlete_id=$2::uuid and status='in_progress'`,
+      [parsed.data, session.user.id],
     ))
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "No se pudo finalizar" }
+    return { ok: false as const, error: error instanceof Error ? error.message : "No se pudo descartar" }
   }
-  revalidatePath("/entrenamiento")
-  revalidatePath("/hoy")
-  return synced
+  revalidateWorkoutPaths()
+  return { ok: true as const }
 }
 
 export async function deleteWorkoutSession(input: unknown) {

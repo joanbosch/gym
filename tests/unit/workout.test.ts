@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest"
 import { deduplicateDrafts } from "@/lib/offline/workout-drafts"
 import { averageWeight, calculateVolume, setLogSchema } from "@/lib/validation/workout"
 import { getYouTubeEmbedUrl, getYouTubeVideoId } from "@/lib/video"
+import { createGuidedLogs, firstPendingStep, guidedWorkoutVolume, orderedGuidedLogs } from "@/lib/workout/guided"
+import { upperA } from "@/lib/demo-data"
 
 describe("tracking de entrenamiento", () => {
   it("calcula solo el volumen de series completadas", () => {
@@ -27,6 +29,7 @@ describe("borradores offline", () => {
       loadKg: null,
       reps: null,
       rir: null,
+      status: "pending" as const,
       completed: false,
     }
 
@@ -46,6 +49,21 @@ describe("borradores offline", () => {
 
     expect(result).toHaveLength(1)
     expect(result[0]?.loadKg).toBe(20)
+  })
+})
+
+describe("entrenamiento guiado", () => {
+  it("crea una etapa pendiente por cada serie prescrita y conserva su orden", () => {
+    const logs = createGuidedLogs(upperA, "20000000-0000-4000-8000-000000000001", "2026-08-06T08:00:00.000Z")
+    expect(logs).toHaveLength(upperA.exercises.reduce((total, exercise) => total + exercise.sets, 0))
+    expect(firstPendingStep(orderedGuidedLogs(upperA, logs))).toBe(0)
+  })
+
+  it("solo suma volumen de series completadas", () => {
+    const logs = createGuidedLogs(upperA, "20000000-0000-4000-8000-000000000001")
+    logs[0] = { ...logs[0], loadKg: 20, reps: 10, status: "completed", completed: true }
+    logs[1] = { ...logs[1], loadKg: 30, reps: 10, status: "skipped", completed: false }
+    expect(guidedWorkoutVolume(logs)).toBe(200)
   })
 })
 

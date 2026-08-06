@@ -1,9 +1,9 @@
 "use client"
 
 import { MoonIcon, SunIcon } from "lucide-react"
-import { useTheme } from "next-themes"
 import { useSyncExternalStore } from "react"
 import { Button } from "@/components/ui/button"
+import { useTheme } from "@/components/providers/theme-provider"
 
 const subscribe = () => () => undefined
 
